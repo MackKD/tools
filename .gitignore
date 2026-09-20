@@ -1,3 +1,9 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+
+# Study Checker runtime files (personal data stays local)
+Study_Checker/study_data.json
+Study_Checker/*.lock
+Study_Checker/*.tmp
+Study_Checker/*.corrupt

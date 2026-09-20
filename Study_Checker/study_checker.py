@@ -1,6 +1,10 @@
+import contextlib
 import json
+import math
 import os
+import shutil
 import sys
+import tempfile
 import calendar
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -23,7 +27,7 @@ def _data_dir():
     else:
         base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
     path = os.path.join(base, "StudyChecker")
-    os.makedirs(path, exist_ok=True)
+    os.makedirs(path, mode=0o700, exist_ok=True)
     return path
 
 
@@ -33,17 +37,143 @@ ICON_FILE = os.path.join(getattr(sys, "_MEIPASS", SCRIPT_DIR), "study_checker.ic
 CATEGORIES = ["School", "Coding", "Hacking"]
 GOALS = {"School": 40, "Coding": 20, "Hacking": 15}
 CATEGORY_COLORS = {"School": "#3b82f6", "Coding": "#22c55e", "Hacking": "#a855f7"}
+MAX_HOURS = 24  # per category per day
+
+
+def _valid_hours(v):
+    return (
+        isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+        and 0 <= v <= MAX_HOURS
+    )
+
+
+def _backup_bad_file():
+    backup = DATA_FILE + ".corrupt"
+    try:
+        shutil.copy2(DATA_FILE, backup)
+        return backup
+    except OSError:
+        return None
+
+
+def _read_data():
+    """Read and validate the data file. Returns (clean, dropped).
+
+    The file is plain JSON that can be hand-edited or damaged, so nothing in it is trusted.
+    Raises OSError/ValueError (bad JSON, bad UTF-8, wrong shape) if it can't be used at all.
+    """
+    if not os.path.exists(DATA_FILE):
+        return {}, 0
+
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if not isinstance(raw, dict):
+        raise ValueError("expected a JSON object")
+
+    clean, dropped = {}, 0
+    for key, entry in raw.items():
+        try:
+            date.fromisoformat(key)
+        except (TypeError, ValueError):
+            dropped += 1
+            continue
+        if not isinstance(entry, dict):
+            dropped += 1
+            continue
+        clean[key] = {}
+        for cat in CATEGORIES:
+            v = entry.get(cat, 0)
+            if not _valid_hours(v):
+                dropped += 1
+                v = 0
+            clean[key][cat] = float(v)
+    return clean, dropped
+
 
 def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    """Return (data, problem). problem is a message for the user, or None if the file was fine.
+
+    A bad file starts empty (after being backed up) and bad entries are dropped.
+    """
+    try:
+        clean, dropped = _read_data()
+    except (OSError, ValueError) as e:
+        backup = _backup_bad_file()
+        saved = f"A copy was saved as:\n{backup}" if backup else "It could not be backed up."
+        return {}, f"{os.path.basename(DATA_FILE)} couldn't be read ({e}).\n\n{saved}\n\nStarting with an empty log."
+
+    if dropped:
+        backup = _backup_bad_file()
+        saved = f"The original was copied to:\n{backup}" if backup else "It could not be backed up."
+        return clean, f"{dropped} invalid value(s) in {os.path.basename(DATA_FILE)} were ignored.\n\n{saved}"
+    return clean, None
+
+
+@contextlib.contextmanager
+def _file_lock():
+    """Cross-process lock so two running copies can't interleave a read-modify-write.
+
+    The OS drops it if the process dies, so there's no stale lock file to clean up.
+    """
+    with open(DATA_FILE + ".lock", "a+b") as lock:
+        if sys.platform == "win32":
+            import msvcrt
+
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            # elsewhere the flock is released when the file closes
+
+
+def update_day(key, values):
+    """Set one day (or clear it, if every value is zero) on top of what's on disk right now.
+
+    Merging into the current file, not this process's older snapshot, is what stops a second
+    running copy from erasing the first one's entries. Returns the merged data.
+    """
+    with _file_lock():
+        try:
+            data, dropped = _read_data()
+        except ValueError as e:
+            # Don't overwrite a file we can't understand; the user's data may still be in it.
+            raise OSError(
+                f"{os.path.basename(DATA_FILE)} was changed on disk and can't be read ({e}). "
+                "Not overwriting it."
+            ) from e
+        if dropped:
+            _backup_bad_file()
+        if any(v > 0 for v in values.values()):
+            data[key] = values
+        else:
+            data.pop(key, None)
+        save_data(data)
+        return data
 
 
 def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    # Write to a temp file and swap it in, so a crash mid-write can't truncate the real one.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(DATA_FILE), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, allow_nan=False)
+        os.replace(tmp, DATA_FILE)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def week_bounds(d):
@@ -87,8 +217,14 @@ class DayDialog(tk.Toplevel):
             except ValueError:
                 messagebox.showerror("Invalid input", f"'{raw}' isn't a valid number for {cat}.")
                 return
+            if not math.isfinite(hrs):
+                messagebox.showerror("Invalid input", f"'{raw}' isn't a valid number for {cat}.")
+                return
             if hrs < 0:
                 messagebox.showerror("Invalid input", f"{cat} hours can't be negative.")
+                return
+            if hrs > MAX_HOURS:
+                messagebox.showerror("Invalid input", f"{cat} hours can't exceed {MAX_HOURS} in a day.")
                 return
             result[cat] = hrs
         self.on_save(self.target_date, result)
@@ -103,7 +239,9 @@ class StudyCheckerApp(tk.Tk):
         self._set_icon()
         self._fonts = {}  # keep references, or Tk drops the fonts when they're collected
 
-        self.data = load_data()
+        self.data, problem = load_data()
+        if problem:
+            self.after(200, lambda: messagebox.showwarning("Study Checker", problem, parent=self))
         today = date.today()
         self.view_year = today.year
         self.view_month = today.month
@@ -113,9 +251,8 @@ class StudyCheckerApp(tk.Tk):
         self._build_calendar_frame()
         self._build_summary_frame()
 
-        self.render_calendar()
-        self.render_summary()
-        self.render_stats()
+        self.render_all()
+        self.bind("<FocusIn>", self._on_focus_in)
 
     def _set_icon(self):
         # .ico only works with iconbitmap on Windows; on macOS/Linux it errors or is ignored.
@@ -274,15 +411,33 @@ class StudyCheckerApp(tk.Tk):
         DayDialog(self, target_date, existing, self.on_day_saved)
 
     def on_day_saved(self, target_date, values):
-        key = target_date.isoformat()
-        if any(v > 0 for v in values.values()):
-            self.data[key] = values
-        elif key in self.data:
-            del self.data[key]
-        save_data(self.data)
+        try:
+            self.data = update_day(target_date.isoformat(), values)
+        except OSError as e:
+            # self.data is untouched, so the screen still matches what's on disk.
+            messagebox.showerror("Couldn't save", f"Your changes were not saved:\n{e}")
+            return
+        self.render_all()
+
+    def render_all(self):
         self.render_calendar()
         self.render_summary()
         self.render_stats()
+
+    def refresh_from_disk(self):
+        """Pick up changes another running copy saved. Quietly does nothing if the file can't be read."""
+        try:
+            with _file_lock():
+                data, _ = _read_data()
+        except (OSError, ValueError):
+            return
+        if data != self.data:
+            self.data = data
+            self.render_all()
+
+    def _on_focus_in(self, event):
+        if event.widget is self:  # FocusIn also fires for every child widget
+            self.refresh_from_disk()
 
     def render_summary(self):
         for widget in self.summary_frame.winfo_children():
