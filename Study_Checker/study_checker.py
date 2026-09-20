@@ -1,12 +1,34 @@
 import json
 import os
+import sys
 import calendar
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkinter import font as tkfont
 from datetime import date, timedelta
 
-DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "study_data.json")
-ICON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "study_checker.ico")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _data_dir():
+    # Running from source: keep the data next to the script.
+    if not getattr(sys, "frozen", False):
+        return SCRIPT_DIR
+    # Packaged app: the bundle is read-only (macOS) or a temp dir (Windows onefile),
+    # so store data in the per-user location instead.
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+    path = os.path.join(base, "StudyChecker")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+DATA_FILE = os.path.join(_data_dir(), "study_data.json")
+ICON_FILE = os.path.join(getattr(sys, "_MEIPASS", SCRIPT_DIR), "study_checker.ico")
 
 CATEGORIES = ["School", "Coding", "Hacking"]
 GOALS = {"School": 40, "Coding": 20, "Hacking": 15}
@@ -14,13 +36,13 @@ CATEGORY_COLORS = {"School": "#3b82f6", "Coding": "#22c55e", "Hacking": "#a855f7
 
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
 def save_data(data):
-    with open(DATA_FILE, "w") as f:
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
@@ -78,8 +100,8 @@ class StudyCheckerApp(tk.Tk):
         super().__init__()
         self.title("Study Checker")
         self.resizable(False, False)
-        if os.path.exists(ICON_FILE):
-            self.iconbitmap(ICON_FILE)
+        self._set_icon()
+        self._fonts = {}  # keep references, or Tk drops the fonts when they're collected
 
         self.data = load_data()
         today = date.today()
@@ -95,12 +117,30 @@ class StudyCheckerApp(tk.Tk):
         self.render_summary()
         self.render_stats()
 
+    def _set_icon(self):
+        # .ico only works with iconbitmap on Windows; on macOS/Linux it errors or is ignored.
+        if sys.platform != "win32" or not os.path.exists(ICON_FILE):
+            return
+        try:
+            self.iconbitmap(ICON_FILE)
+        except tk.TclError:
+            pass
+
+    def font(self, size, bold=False):
+        """Platform default UI font (Segoe UI on Windows, system font on macOS) at a given size."""
+        key = (size, bold)
+        if key not in self._fonts:
+            f = tkfont.nametofont("TkDefaultFont").copy()
+            f.configure(size=size, weight="bold" if bold else "normal")
+            self._fonts[key] = f
+        return self._fonts[key]
+
     def _build_stats_bar(self):
         frame = ttk.Frame(self, padding=(12, 10, 12, 0))
         frame.grid(row=0, column=0, columnspan=2, sticky="ew")
 
         self.stats_var = tk.StringVar()
-        ttk.Label(frame, textvariable=self.stats_var, font=("Segoe UI", 10, "bold")).grid(
+        ttk.Label(frame, textvariable=self.stats_var, font=self.font(10, bold=True)).grid(
             row=0, column=0, sticky="w"
         )
 
@@ -110,7 +150,7 @@ class StudyCheckerApp(tk.Tk):
 
         ttk.Button(frame, text="<", width=3, command=self.prev_month).grid(row=0, column=0)
         self.month_label_var = tk.StringVar()
-        ttk.Label(frame, textvariable=self.month_label_var, font=("Segoe UI", 12, "bold")).grid(
+        ttk.Label(frame, textvariable=self.month_label_var, font=self.font(12, bold=True)).grid(
             row=0, column=1, padx=10
         )
         ttk.Button(frame, text=">", width=3, command=self.next_month).grid(row=0, column=2)
@@ -182,7 +222,7 @@ class StudyCheckerApp(tk.Tk):
 
         day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         for col, name in enumerate(day_names):
-            ttk.Label(self.cal_frame, text=name, font=("Segoe UI", 9, "bold")).grid(
+            ttk.Label(self.cal_frame, text=name, font=self.font(9, bold=True)).grid(
                 row=0, column=col, padx=2, pady=2
             )
 
@@ -211,7 +251,7 @@ class StudyCheckerApp(tk.Tk):
         cell.grid_propagate(False)
 
         fg = "black" if in_month else "#9ca3af"
-        tk.Label(cell, text=str(day.day), bg=cell["bg"], fg=fg, font=("Segoe UI", 9, "bold")).pack(
+        tk.Label(cell, text=str(day.day), bg=cell["bg"], fg=fg, font=self.font(9, bold=True)).pack(
             anchor="nw", padx=4, pady=2
         )
 
@@ -222,7 +262,7 @@ class StudyCheckerApp(tk.Tk):
             mark = "✓" if done else "·"
             color = CATEGORY_COLORS[cat] if done else "#cbd5e1"
             tk.Label(
-                marks, text=f"{cat[0]}{mark}", bg=cell["bg"], fg=color, font=("Segoe UI", 8)
+                marks, text=f"{cat[0]}{mark}", bg=cell["bg"], fg=color, font=self.font(8)
             ).pack(side="left", padx=1)
 
         for widget in (cell, *cell.winfo_children(), *marks.winfo_children()):
@@ -252,7 +292,7 @@ class StudyCheckerApp(tk.Tk):
         ttk.Label(
             self.summary_frame,
             text=f"This Week\n{start.strftime('%b %d')} – {end.strftime('%b %d')}",
-            font=("Segoe UI", 10, "bold"),
+            font=self.font(10, bold=True),
             justify="center",
         ).grid(row=0, column=0, pady=(0, 10))
 
