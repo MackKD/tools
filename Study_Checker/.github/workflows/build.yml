@@ -1,0 +1,83 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: StudyChecker-windows
+            path: dist/StudyChecker.exe
+            launch: dist/StudyChecker.exe
+          - os: macos-latest # Apple Silicon (arm64) only
+            artifact: StudyChecker-macos
+            path: dist/StudyChecker.app
+            launch: dist/StudyChecker.app/Contents/MacOS/StudyChecker
+          # Built on the oldest available Ubuntu so the binary runs on more distros
+          # (a PyInstaller binary needs at least the glibc it was built against).
+          - os: ubuntu-22.04
+            artifact: StudyChecker-linux
+            path: dist/StudyChecker
+            launch: dist/StudyChecker
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start a virtual display (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1280x1024x24 &
+          sleep 2
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Run from source (builds the whole window, then closes it)
+        run: python -c "import study_checker as m; a = m.StudyCheckerApp(); a.update(); a.destroy(); print('ok')"
+
+      - name: Install build tools
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Build
+        run: pyinstaller --noconfirm study_checker.spec
+
+      - name: Launch the built app and check it stays open
+        shell: python
+        env:
+          APP: ${{ matrix.launch }}
+        run: |
+          import os, subprocess, time
+          p = subprocess.Popen([os.environ["APP"]])
+          time.sleep(6)
+          code = p.poll()
+          p.terminate()
+          if code is not None:
+              raise SystemExit(f"app exited early with code {code}")
+          print("still running after 6s")
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p upload
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # zip keeping the .app's structure and permissions intact
+            ditto -c -k --keepParent "${{ matrix.path }}" "upload/${{ matrix.artifact }}.zip"
+          else
+            cp "${{ matrix.path }}" upload/
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: upload/*

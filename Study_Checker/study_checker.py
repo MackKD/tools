@@ -6,10 +6,21 @@ import shutil
 import sys
 import tempfile
 import calendar
-import tkinter as tk
-from tkinter import ttk, messagebox
-from tkinter import font as tkfont
 from datetime import date, timedelta
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+    from tkinter import font as tkfont
+except ImportError:
+    # Many Linux/Homebrew Pythons ship without Tk; say how to get it instead of a bare traceback.
+    sys.exit(
+        "Study Checker needs Python's Tk support (tkinter), which isn't installed.\n"
+        "  Debian/Ubuntu: sudo apt install python3-tk\n"
+        "  Fedora:        sudo dnf install python3-tkinter\n"
+        "  macOS (brew):  brew install python-tk\n"
+        "  Otherwise, install Python from python.org, which includes Tk."
+    )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -38,6 +49,8 @@ CATEGORIES = ["School", "Coding", "Hacking"]
 GOALS = {"School": 40, "Coding": 20, "Hacking": 15}
 CATEGORY_COLORS = {"School": "#3b82f6", "Coding": "#22c55e", "Hacking": "#a855f7"}
 MAX_HOURS = 24  # per category per day
+# Color emoji can crash older Tk builds on X11 (BadLength), so Linux gets plain text.
+FLAME = "" if sys.platform.startswith("linux") else "🔥 "
 
 
 def _valid_hours(v):
@@ -327,9 +340,9 @@ class StudyCheckerApp(tk.Tk):
         if streak == 0:
             msg = "No streak yet — log today to start one."
         elif today_logged:
-            msg = f"🔥 {streak}-day streak! Nice work today."
+            msg = f"{FLAME}{streak}-day streak! Nice work today."
         else:
-            msg = f"🔥 {streak}-day streak — log today to keep it alive."
+            msg = f"{FLAME}{streak}-day streak — log today to keep it alive."
         self.stats_var.set(msg)
 
     def prev_month(self):

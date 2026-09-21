@@ -1,0 +1,12 @@
+# Your own study log. It lives next to the script when run from source, so never commit it.
+study_data.json
+study_data.json.*
+
+# Build output
+build/
+dist/
+
+__pycache__/
+*.pyc
+.venv/
+venv/

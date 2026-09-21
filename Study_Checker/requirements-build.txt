@@ -1,0 +1,2 @@
+# Only needed to build the standalone app; running from source has no dependencies.
+pyinstaller>=6.10
